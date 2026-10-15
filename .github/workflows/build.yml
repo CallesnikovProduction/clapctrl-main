@@ -1,0 +1,67 @@
+name: Build and test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    name: Desktop (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    env:
+      GRADLE_USER_HOME: ${{ github.workspace }}/.gradle-user-home
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxext-dev libxi-dev libxrender-dev libxtst-dev libgl1 libfontconfig1
+      - name: Test and create host application image
+        shell: bash
+        run: bash ./gradlew --no-daemon --stacktrace test :app-desktop:createDistributable
+      - name: Archive Linux runtime image and source
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bash packaging/linux/build-portable.sh --package-only
+          bash packaging/source-archive.sh
+      - name: Archive Windows runtime image
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./packaging/windows/build-portable.ps1 -PackageOnly
+      - name: Upload portable distributions and checksums
+        uses: actions/upload-artifact@v6
+        with:
+          name: clapctrl-${{ runner.os }}-${{ runner.arch }}
+          path: packaging/dist/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: tests-${{ runner.os }}
+          path: |
+            core/build/reports/tests/
+            platform/build/reports/tests/
+            app-desktop/build/reports/tests/
+          if-no-files-found: ignore
+          retention-days: 14

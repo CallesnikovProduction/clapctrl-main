@@ -1,0 +1,5 @@
+dist/
+arch/src/
+arch/pkg/
+arch/*.pkg.tar.*
+arch/*.log

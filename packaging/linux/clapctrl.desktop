@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ClapCtrl
+Comment=Local acoustic desktop automation
+Exec=clapctrl
+TryExec=clapctrl
+Icon=clapctrl
+Terminal=false
+Categories=Utility;Accessibility;
+StartupNotify=false

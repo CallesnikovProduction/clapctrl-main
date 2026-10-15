@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ClapCtrl
+Comment=Open ClapCtrl at login; microphone starts only through the application consent flow
+Exec=clapctrl
+TryExec=clapctrl
+Icon=clapctrl
+Terminal=false
+X-GNOME-Autostart-enabled=true

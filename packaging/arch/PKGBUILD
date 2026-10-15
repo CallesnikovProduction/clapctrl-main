@@ -1,0 +1,68 @@
+# Local checkout recipe. Run from the repository root:
+#   makepkg --dir packaging/arch
+# No release URL or remote Git source is assumed. prepare() snapshots current source.
+pkgname=clapctrl
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Local acoustic desktop automation for Linux and Windows'
+arch=('x86_64' 'aarch64')
+license=('Apache-2.0')
+depends=('alsa-lib' 'fontconfig' 'freetype2' 'gcc-libs' 'glibc' 'libglvnd' 'libx11' 'libxext' 'libxi' 'libxrandr' 'libxrender' 'libxtst' 'zlib')
+makedepends=('java25-openjdk')
+optdepends=(
+  'xorg-xwayland: display the AWT window under Wayland when the bundled JDK uses X11'
+  'pipewire-alsa: route Java Sound ALSA capture through PipeWire'
+  'wireplumber: toggle default output mute with wpctl'
+  'libpulse: alternative default output mute with pactl'
+  'playerctl: MPRIS media playback control'
+  'grim: Wayland screenshots on supported compositors'
+  'hyprland: Hyprland workspace integration via hyprctl'
+  'hyprlock: Hyprland screen lock'
+  'kitty: supported terminal emulator'
+  'wofi: supported Wayland application launcher'
+)
+options=('!strip' '!debug')
+source=()
+sha256sums=()
+
+prepare() {
+  # makepkg requires PKGBUILD to reside in its working directory.
+  local checkout
+  checkout=$(cd "$startdir/../.." && pwd -P)
+  [[ -f "$checkout/settings.gradle.kts" && -f "$checkout/packaging/lib.sh" ]] || {
+    error 'Run makepkg --dir packaging/arch from the ClapCtrl repository root.'
+    return 1
+  }
+  source "$checkout/packaging/lib.sh"
+  mkdir -p "$srcdir/clapctrl"
+  clapctrl_source_tar "$checkout" -cf - | tar -C "$srcdir/clapctrl" -xf -
+}
+
+build() {
+  cd "$srcdir/clapctrl"
+  export JAVA_HOME=/usr/lib/jvm/java-25-openjdk
+  export PATH="$JAVA_HOME/bin:$PATH"
+  export GRADLE_USER_HOME="$srcdir/gradle-user-home"
+  bash ./gradlew --no-daemon :app-desktop:createDistributable
+}
+
+check() {
+  cd "$srcdir/clapctrl"
+  export JAVA_HOME=/usr/lib/jvm/java-25-openjdk
+  export PATH="$JAVA_HOME/bin:$PATH"
+  export GRADLE_USER_HOME="$srcdir/gradle-user-home"
+  bash ./gradlew --no-daemon test
+}
+
+package() {
+  cd "$srcdir/clapctrl"
+  local image=app-desktop/build/compose/binaries/main/app/ClapCtrl
+  [[ -x "$image/bin/ClapCtrl" ]] || { error 'Linux application image was not generated'; return 1; }
+  install -d "$pkgdir/opt/clapctrl"
+  cp -a "$image/." "$pkgdir/opt/clapctrl/"
+  install -Dm755 packaging/linux/clapctrl "$pkgdir/usr/bin/clapctrl"
+  install -Dm644 packaging/linux/clapctrl.desktop "$pkgdir/usr/share/applications/clapctrl.desktop"
+  install -Dm644 packaging/linux/clapctrl.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/clapctrl.svg"
+  install -Dm644 packaging/linux/clapctrl-autostart.desktop "$pkgdir/usr/share/clapctrl/clapctrl-autostart.desktop"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/clapctrl/LICENSE"
+}
