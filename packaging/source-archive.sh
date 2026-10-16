@@ -2,7 +2,7 @@
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 source "$root/packaging/lib.sh"
-version=${CLAPCTRL_VERSION:-0.1.0}
+version=${CLAPCTRL_VERSION:-0.1.2}
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'CLAPCTRL_VERSION must be x.y.z' >&2; exit 2; }
 epoch=${SOURCE_DATE_EPOCH:-0}
 [[ "$epoch" =~ ^[0-9]+$ ]] || { echo 'SOURCE_DATE_EPOCH must be an integer' >&2; exit 2; }

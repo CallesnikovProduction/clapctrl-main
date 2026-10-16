@@ -35,7 +35,12 @@ data class DatasetRecordingResult(
 data class DatasetReport(val metrics: EvaluationReport, val recordings: List<DatasetRecordingResult>)
 
 object DatasetEvaluator {
-    fun evaluate(manifest: Path, classifier: AcousticClassifier = RuleBasedClassifier()): DatasetReport {
+    fun evaluate(
+        manifest: Path,
+        classifier: AcousticClassifier = RuleBasedClassifier(),
+        confidenceThresholds: Map<AcousticClass, Double> = CalibrationEvaluation.defaultConfidenceThresholds,
+    ): DatasetReport {
+        CalibrationEvaluation.validateThresholds(confidenceThresholds)
         val recordings = if (manifest.fileName.toString().endsWith(".csv", ignoreCase = true)) {
             parseCsv(readBoundedJson(manifest))
         } else storageJson.decodeFromString<List<DatasetRecording>>(readBoundedJson(manifest))
@@ -43,7 +48,7 @@ object DatasetEvaluator {
         val base = manifest.toAbsolutePath().parent
         val results = recordings.map { recording ->
             require(recording.file.isNotBlank() && (recording.eventEndMs == null || recording.eventEndMs >= 0)) { "Invalid recording metadata" }
-            evaluateRecording(base.resolve(recording.file).normalize(), recording, classifier)
+            evaluateRecording(base.resolve(recording.file).normalize(), recording, classifier, confidenceThresholds)
         }
         val summary = CalibrationEvaluation.summarize(results.map {
             AcousticClass.valueOf(it.expected) to AcousticClass.valueOf(it.predicted)
@@ -53,11 +58,14 @@ object DatasetEvaluator {
             latencyMs = latencies.takeIf { it.isNotEmpty() }?.average(),
             note = "Independent recording-level replay through the production DSP pipeline. No detected candidate counts as NEGATIVE. " +
                 "A positive file must contain one event; multiple candidates are reported. Latency requires eventEndMs annotations " +
-                "and measures audio completion to candidate emission, excluding hardware/action time. Use recordings separate from calibration.",
+                "and measures audio completion to candidate emission, excluding hardware/action time. " +
+                "Confidence thresholds: CLAP ${confidenceThresholds.getValue(AcousticClass.CLAP)}, " +
+                "SNAP ${confidenceThresholds.getValue(AcousticClass.SNAP)}. Use recordings separate from calibration.",
         ), results)
     }
 
-    private fun evaluateRecording(path: Path, recording: DatasetRecording, classifier: AcousticClassifier): DatasetRecordingResult {
+    private fun evaluateRecording(path: Path, recording: DatasetRecording, classifier: AcousticClassifier,
+                                  confidenceThresholds: Map<AcousticClass, Double>): DatasetRecordingResult {
         require(Files.isRegularFile(path) && Files.size(path) <= 120_000_000) { "Recording is missing or exceeds 120 MB: $path" }
         val pipeline = AcousticPipeline(classifier = classifier)
         var bestClass = AcousticClass.NEGATIVE
@@ -93,9 +101,10 @@ object DatasetEvaluator {
                     require(samplePosition <= rate * 600) { "Recording exceeds ten minutes: $path" }
                     output.candidate?.let { candidate ->
                         candidateCount++
-                        if (candidate.classification != AcousticClass.NEGATIVE && candidate.confidence > bestConfidence) {
+                        val deployed = CalibrationEvaluation.deployedClass(candidate.classification, candidate.confidence, confidenceThresholds)
+                        if (deployed != AcousticClass.NEGATIVE && candidate.confidence > bestConfidence) {
                             bestConfidence = candidate.confidence
-                            bestClass = candidate.classification
+                            bestClass = deployed
                             selectedEmissionMs = (samplePosition * 1000 / rate).toLong()
                         }
                     }

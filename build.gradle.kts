@@ -4,7 +4,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose") version "2.4.0" apply false
     id("org.jetbrains.compose") version "1.10.3" apply false
 }
-allprojects { group = "dev.clapctrl"; version = "0.1.0" }
+allprojects { group = "dev.clapctrl"; version = "0.1.2" }
 subprojects {
     tasks.withType<Test>().configureEach {
         useJUnitPlatform()

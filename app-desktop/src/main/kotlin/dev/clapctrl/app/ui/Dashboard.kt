@@ -12,6 +12,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.clapctrl.app.*
@@ -45,9 +46,11 @@ enum class Page(val title: String, val glyph: String) { TRIGGERS("Triggers", "�
                 Hint("Private by design")
                 Text("Audio stays on this device.\nNo accounts. No cloud.", color = Muted, fontSize = 11.sp, lineHeight = 18.sp)
                 Spacer(Modifier.height(12.dp))
-                Text("v0.1.0  ·  LOCAL ENGINE", color = Muted, fontSize = 9.sp, letterSpacing = 0.8.sp)
+                Text("v0.1.2  ·  LOCAL ENGINE", color = Muted, fontSize = 9.sp, letterSpacing = 0.8.sp)
             }
-            Box(Modifier.weight(1f).fillMaxHeight()) {
+            Column(Modifier.weight(1f).fillMaxHeight()) {
+            ActionReadiness(state, controller) { currentPage = Page.CALIBRATION }
+            Box(Modifier.weight(1f).fillMaxWidth()) {
             val scroll = rememberScrollState()
             Column(Modifier.fillMaxWidth().verticalScroll(scroll).padding(horizontal = 30.dp, vertical = 22.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -76,6 +79,11 @@ enum class Page(val title: String, val glyph: String) { TRIGGERS("Triggers", "�
                         }
                     }
                     Signal(state.levels, Modifier.height(34.dp))
+                    if (state.starting) Hint("Waiting for the first real audio frame. Input is not ready yet.")
+                    if (state.listening) Hint("Microphone open · ${state.inputOpenedInMs ?: 0} ms to first PCM · ${state.inputDb} · ${state.framesProcessed} frames")
+                    if (state.calibrating || state.testingRecognition) Hint(if (state.calibrating) "Calibration · desktop actions suspended" else "Recognition test · desktop actions suspended", Accent)
+                    Text("Last sound: ${state.lastAcousticEvent}", fontSize = 12.sp, color = Muted, modifier = Modifier.testTag("last-sound-feedback"))
+                    Text("Last action: ${state.actionFeedback}", fontSize = 12.sp, color = Accent, modifier = Modifier.testTag("last-action-feedback"))
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text((state.devices.firstOrNull { it.id == state.configuration.microphoneId }?.name ?: "Default microphone") +
                             if (state.listening) " · ${state.sampleRate} Hz" else " · input off", color = Muted, fontSize = 11.sp)
@@ -94,6 +102,39 @@ enum class Page(val title: String, val glyph: String) { TRIGGERS("Triggers", "�
                 }
             }
             VerticalScrollbar(rememberScrollbarAdapter(scroll), Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 12.dp))
+            }
+            }
+        }
+    }
+}
+
+@Composable private fun ActionReadiness(state: DashboardState, controller: AppController, onCalibrate: () -> Unit) {
+    val title = when {
+        state.training -> "Checking samples and saving profile…"
+        state.hasUnsavedCalibration && state.readyToTrain -> "Samples ready · profile NOT saved yet"
+        state.calibrating || state.hasUnsavedCalibration -> "Calibration incomplete · desktop actions paused"
+        state.testingRecognition -> "Recognition test · desktop actions PAUSED"
+        !state.listening -> "Microphone off · enable monitoring to run actions"
+        else -> "Desktop actions ENABLED"
+    }
+    Surface(color = SurfaceRaised, elevation = 2.dp) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(title, color = Accent, fontSize = 14.sp, fontWeight = FontWeight.Medium, modifier = Modifier.testTag("action-readiness"))
+                Hint(if (state.calibrating || state.hasUnsavedCalibration) state.calibrationProgress + " · each class is required"
+                    else "Profile: ${state.activeProfileName ?: "None · default rules"}. TWO claps or ONE finger snap.")
+                state.error?.let { Hint(it, Danger) }
+            }
+            when {
+                state.hasUnsavedCalibration && state.readyToTrain -> Button(onClick = controller::trainProfile, enabled = !state.training,
+                    modifier = Modifier.testTag("calibration-activate")) { Text("Save profile & enable actions", fontSize = 11.sp) }
+                state.calibrating || state.hasUnsavedCalibration -> OutlinedButton(onClick = {
+                    onCalibrate()
+                    if (!state.calibrating) controller.resumeCalibration()
+                }, enabled = state.listening && !state.training, modifier = Modifier.testTag("calibration-continue")) { Text("Continue calibration", fontSize = 11.sp) }
+                state.testingRecognition -> Button(onClick = controller::enableActions, enabled = state.listening && !state.training,
+                    modifier = Modifier.testTag("actions-enable")) { Text("Enable desktop actions", fontSize = 11.sp) }
             }
         }
     }

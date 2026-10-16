@@ -59,6 +59,18 @@ class AcousticPipelineTest {
         assertEquals(500L, result.second.single().timestampMs)
     }
 
+    @Test fun `weak raw candidate cannot consume the first strong clap of a later pair`() {
+        val confidence = listOf(0.2, 0.9, 0.9).iterator()
+        val pipeline = AcousticPipeline(classifier = AcousticClassifier { AcousticClass.CLAP to confidence.next() })
+        val result = run(pipeline, signal(48_000, 1200, 200, 500, 800),
+            confidenceThresholds = mapOf(AcousticClass.CLAP to 0.75, AcousticClass.SNAP to 0.75))
+        assertEquals(listOf(0.2, 0.9, 0.9), result.first.map { it.confidence })
+        assertTrue(result.first.all { it.classification == AcousticClass.CLAP })
+        assertEquals(Gesture.DOUBLE_CLAP, result.second.single().gesture)
+        assertEquals(800L, result.second.single().timestampMs)
+        assertEquals(0.9, result.second.single().confidence)
+    }
+
     @Test fun `minimum interval remains usable after a longer first transient`() {
         val result = run(AcousticPipeline(classifier = alwaysClap), signal(48_000, 1000, 200, 350))
         assertEquals(2, result.first.size)
@@ -105,6 +117,27 @@ class AcousticPipelineTest {
         assertTrue(result.second.isEmpty())
     }
 
+    @Test fun `recognition reset preserves noise estimate but breaks an unfinished clap pair`() {
+        val pipeline = AcousticPipeline(classifier = alwaysClap)
+        run(pipeline, signal(48_000, 400, 200))
+        val before = pipeline.process(AudioFrame(FloatArray(0), 48_000, 400)).noiseFloor
+        pipeline.resetRecognition()
+        assertEquals(before, pipeline.process(AudioFrame(FloatArray(0), 48_000, 400)).noiseFloor)
+        val result = run(pipeline, signal(48_000, 400, 100), startMs = 400)
+        assertEquals(1, result.first.size)
+        assertTrue(result.second.isEmpty())
+    }
+
+    @Test fun `recognition reset discards active transient and its tail without resetting stream time`() {
+        val pipeline = AcousticPipeline(classifier = alwaysClap)
+        val samples = signal(48_000, 1000, 200, 500)
+        run(pipeline, samples.copyOfRange(0, 48_000 * 215 / 1000), chunk = 137)
+        pipeline.resetRecognition()
+        val result = run(pipeline, samples.copyOfRange(48_000 * 215 / 1000, samples.size), startMs = 215)
+        assertEquals(listOf(500L), result.first.map { it.timestampMs })
+        assertTrue(result.second.isEmpty())
+    }
+
     @Test fun `timestamp gap clears previous clap and stale frames are ignored`() {
         val pipeline = AcousticPipeline(classifier = alwaysClap)
         run(pipeline, signal(48_000, 400, 200))
@@ -130,6 +163,9 @@ class AcousticPipelineTest {
     @Test fun `invalid sensitivity and sample rate fail fast`() {
         assertFailsWith<IllegalArgumentException> { AcousticPipeline(DetectorSettings(sensitivity = Double.NaN)) }
         assertFailsWith<IllegalArgumentException> { AcousticPipeline().process(AudioFrame(FloatArray(5), 0, 0)) }
+        assertFailsWith<IllegalArgumentException> {
+            AcousticPipeline().process(AudioFrame(FloatArray(480), 48_000, 0), mapOf(AcousticClass.CLAP to Double.NaN))
+        }
     }
 
     private fun signal(rate: Int, durationMs: Int, vararg onsetMs: Int): FloatArray {
@@ -149,13 +185,14 @@ class AcousticPipelineTest {
         return samples
     }
 
-    private fun run(pipeline: AcousticPipeline, samples: FloatArray, rate: Int = 48_000, chunk: Int = rate / 100, startMs: Long = 0): Pair<List<AcousticCandidate>, List<Detection>> {
+    private fun run(pipeline: AcousticPipeline, samples: FloatArray, rate: Int = 48_000, chunk: Int = rate / 100, startMs: Long = 0,
+                    confidenceThresholds: Map<AcousticClass, Double> = emptyMap()): Pair<List<AcousticCandidate>, List<Detection>> {
         val candidates = ArrayList<AcousticCandidate>()
         val detections = ArrayList<Detection>()
         var offset = 0
         while (offset < samples.size) {
             val end = (offset + chunk).coerceAtMost(samples.size)
-            val output = pipeline.process(AudioFrame(samples.copyOfRange(offset, end), rate, startMs + offset * 1000L / rate))
+            val output = pipeline.process(AudioFrame(samples.copyOfRange(offset, end), rate, startMs + offset * 1000L / rate), confidenceThresholds)
             output.candidate?.let(candidates::add)
             detections += output.detections
             offset = end

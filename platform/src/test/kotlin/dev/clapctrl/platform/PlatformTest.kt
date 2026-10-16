@@ -24,6 +24,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class PlatformTest {
@@ -76,6 +77,40 @@ class PlatformTest {
         assertEquals(480, frames.single().samples.size)
         assertTrue(frames.single().samples.all { it == 0.5f })
         assertFalse(opened.get(), "Capture releases the native line before returning")
+        val diagnostics = assertNotNull(capture.lastCaptureDiagnostics())
+        val firstFrameMs = assertNotNull(diagnostics.firstFrameMs)
+        assertTrue(firstFrameMs >= 0)
+        assertTrue(diagnostics.totalMs >= firstFrameMs)
+        assertEquals(48000, diagnostics.openAttempts.single().sampleRate)
+        assertTrue(diagnostics.openAttempts.single().success)
+    }
+
+    @Test fun `audio diagnostics repeated capture remains explicitly bounded and opt in`() {
+        assertEquals(AudioDiagnosticOptions(1500, "default", 3), parseAudioDiagnosticOptions(arrayOf("--capture-ms", "1500", "--sessions", "3")))
+        assertEquals(AudioDiagnosticOptions(100, "input-id", 1), parseAudioDiagnosticOptions(arrayOf("--capture-ms", "100", "input-id")))
+        assertFailsWith<IllegalArgumentException> { parseAudioDiagnosticOptions(arrayOf("--sessions", "3")) }
+        assertFailsWith<IllegalArgumentException> { parseAudioDiagnosticOptions(arrayOf("--capture-ms", "100", "--sessions", "11")) }
+        assertFailsWith<IllegalArgumentException> { parseAudioDiagnosticOptions(arrayOf("--capture-ms", "0")) }
+        assertFailsWith<IllegalArgumentException> { parseAudioDiagnosticOptions(arrayOf("--capture-ms", "100", "")) }
+        assertFailsWith<IllegalArgumentException> { parseAudioDiagnosticOptions(arrayOf("--capture-ms", "100", "--sessions", "2", "--sessions", "3")) }
+        assertFailsWith<IllegalArgumentException> { parseAudioDiagnosticOptions(arrayOf("--capture-ms", "100", "--sessions")) }
+    }
+
+    @Test fun `failed capture publishes bounded negotiation diagnostics without a false first frame`() = runBlocking {
+        val probes = AtomicInteger(0)
+        val capture = JavaSoundCapture { _, _ -> probes.incrementAndGet(); throw IllegalArgumentException("Unsupported test format") }
+        repeat(2) { session ->
+            assertFailsWith<IllegalStateException> {
+                withTimeout(3000) { capture.capture("default") { error("Failed negotiation cannot deliver frames") } }
+            }
+            val diagnostics = assertNotNull(capture.lastCaptureDiagnostics())
+            assertEquals((session + 1) * 6, probes.get(), "Failed sessions release ownership so the next attempt really runs")
+            assertEquals(6, diagnostics.openAttempts.size)
+            assertTrue(diagnostics.openAttempts.all { !it.success && it.failure == "Unsupported test format" && it.durationMs >= 0 })
+            assertEquals(null, diagnostics.firstFrameMs)
+            assertEquals(null, diagnostics.lineOpenedMs)
+            assertEquals(null, diagnostics.startDurationMs)
+        }
     }
 
     @Test fun `cancel and join waits for capture worker cleanup before immediate restart`() = runBlocking {

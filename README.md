@@ -8,7 +8,7 @@ ClapCtrl captures real microphone PCM, extracts spectral/temporal features, reco
 
 ## Status
 
-Implemented application with **95 passing tests on Windows and 95 on Ubuntu WSL**, packaged runtime launch checks on both, and real Windows microphone capture/pause/resume/background verification. **Real-world clap/snap accuracy and Arch/PipeWire/Hyprland behavior still require target-hardware evaluation.** Conservative starter rules, local calibration and an independent WAV harness are included. Synthetic tests do not establish acoustic accuracy. Exact results and Linux visual-check limitations: [verification report](docs/VERIFICATION.md).
+Implemented application with **114 passing tests on Windows and 114 on Ubuntu WSL**, packaged runtime launch checks on both, and real Windows microphone capture/pause/resume/background verification. **Real-world clap/snap accuracy and Arch/PipeWire/Hyprland behavior still require target-hardware evaluation.** Conservative starter rules, local calibration and an independent WAV harness are included. Synthetic tests do not establish acoustic accuracy. Exact results and Linux visual-check limitations: [verification report](docs/VERIFICATION.md).
 
 ## Features
 
@@ -63,7 +63,7 @@ Custom commands have an executable and one argument per line, with explicit appr
 
 ## Calibrate and evaluate
 
-Open **Calibration**, choose examples per class (default30), and Start session. Collect individual claps, snaps and realistic confusing transients labeled NEGATIVE. Inspect each waveform and accept its label or reject it. Actions are suspended while collecting. Validate & save uses held-out folds; the previous profile is preserved if a class fails80% precision/recall or10% FPR gates. These engineering gates are not a real-world guarantee.
+Open **Calibration**, enable live input, choose examples per class (default10), and Start session. Make one sound at a time. The app freezes the captured sound and asks Handclap, Finger snap, Other sounds, or Discard; answer to continue. No class needs to be selected beforehand. All three counters must reach the target, then collection pauses automatically. Wait for the350ms settling hint after clicks. Pause/resume and Undo help correct collection. Save profile & enable actions uses runtime confidence thresholds in held-out folds; the previous profile is preserved if a class fails80% precision/recall or10% FPR gates. The default10 is per class:30 accepted sounds total. Click the fixed Save profile & enable actions button; after successful validation the profile is saved and automatic actions are enabled. Optional recognition testing can be exited from any page using Enable desktop actions. Last sound and Last action explain rejection and show saved screenshot paths. These engineering gates are not a real-world guarantee.
 
 Profiles follow microphone characteristics rather than OS name. Select a specific microphone for stable association; the system default can change physical hardware. Profiles import/export feature statistics only. Raw audio is never saved. See [calibration guide](docs/CALIBRATION.md) for independent WAV recordings, confusion matrices and annotated latency evaluation.
 

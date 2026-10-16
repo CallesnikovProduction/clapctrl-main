@@ -3,7 +3,7 @@ set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 [[ "$(uname -s)" == Linux ]] || { echo 'Build the Linux distribution on Linux.' >&2; exit 2; }
 [[ $# -eq 0 || ( $# -eq 1 && $1 == --package-only ) ]] || { echo 'Usage: bash packaging/linux/build-portable.sh [--package-only]' >&2; exit 2; }
-version=${CLAPCTRL_VERSION:-0.1.0}
+version=${CLAPCTRL_VERSION:-0.1.2}
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'CLAPCTRL_VERSION must be x.y.z' >&2; exit 2; }
 export GRADLE_USER_HOME="$root/.gradle-user-home"
 if [[ $# -eq 0 ]]; then

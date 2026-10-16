@@ -9,6 +9,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.testTag
 import dev.clapctrl.app.*
 import dev.clapctrl.core.*
 import java.awt.FileDialog
@@ -50,6 +51,7 @@ import java.nio.file.Path
         Hint("${if (state.sampleRate == 0) "No captured frames" else "Negotiated ${state.sampleRate} Hz PCM input"}\nAdaptive noise floor: ${"%.5f".format(state.noiseFloor)} RMS\nProfile: ${state.activeProfileName ?: "Uncalibrated · default heuristic"}")
         Hint("Output hardware is not needed for recognition. Feedback sounds are not included in this version.")
         Hint("Processed ${state.framesProcessed} captured frames this session.")
+        Hint("${state.inputDb} · ${state.inputOpenedInMs?.let { "Opened in $it ms" } ?: "Waiting for input"}\nLast event: ${state.lastAcousticEvent}")
         Hint("Settings: ${controller.dataDirectory.resolve("settings.json")}")
     }
 }
@@ -95,44 +97,114 @@ import java.nio.file.Path
 }
 
 @Composable fun CalibrationScreen(state: DashboardState, controller: AppController) {
-    SectionTitle("Make it sound like you", "Teach the classifier your claps, snaps and everyday background sounds.")
-    var count by remember { mutableStateOf("30") }
+    SectionTitle("Calibrate your microphone", "Make a sound. We catch it, then ask you what it was.")
+    var count by remember { mutableStateOf("10") }
+    var resetDialog by remember { mutableStateOf(false) }
     Panel(Modifier.fillMaxWidth()) {
-        Eyebrow("1 · Collect examples")
-        Hint("Select your microphone in Audio input, then enable monitoring. Clap once or snap once, inspect the captured transient and label it. Include typing and desk taps as negatives. Raw audio is kept only in memory.")
-        Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(count, onValueChange = { count = it }, label = { Text("Examples per class") }, modifier = Modifier.width(180.dp), singleLine = true, enabled = !state.calibrating)
-            Button(onClick = {
+        Eyebrow("1 · Start with live input")
+        Hint(if (state.listening) "Microphone is delivering real audio · ${state.inputDb}. Desktop actions stop during calibration." else "Enable monitoring above and wait until the microphone is open. Calibration cannot collect samples while input is off.")
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(count, onValueChange = { count = it }, label = { Text("Examples per class") }, modifier = Modifier.width(175.dp).testTag("calibration-minimum"), singleLine = true, enabled = !state.calibrationAvailable && !state.training)
+            if (!state.calibrationAvailable) Button(onClick = {
                 val minimum = count.toIntOrNull()
                 if (minimum == null || minimum !in 5..200) controller.report("Use 5–200 examples per class") else controller.beginCalibration(minimum)
-            }, enabled = !state.calibrating && !state.training) { Text("Start session") }
-            if (state.calibrating) TextButton(onClick = controller::endCalibration, enabled = !state.training) { Text("End session") }
+            }, enabled = state.listening && !state.training, modifier = Modifier.testTag("calibration-start")) { Text("Start session") }
+            else if (!state.calibrating) Button(onClick = controller::resumeCalibration, enabled = state.listening && !state.training, modifier = Modifier.testTag("calibration-start")) { Text("Resume session") }
+            if (state.calibrating) TextButton(onClick = controller::endCalibration, enabled = !state.training, modifier = Modifier.testTag("calibration-end")) { Text("Pause session") }
+            if (state.calibrationAvailable) TextButton(onClick = { resetDialog = true }, enabled = !state.training) { Text("Reset samples") }
         }
-        if (state.calibrating) Hint("Calibration is active. Desktop actions are suspended while you collect examples.", Accent)
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            AcousticClass.entries.forEach { label -> Text("${label.name.lowercase().replaceFirstChar { it.uppercase() }}   ${state.sampleCounts[label] ?: 0} / $count", fontSize = 13.sp, color = Accent) }
+        Hint("10 EACH: handclaps + finger snaps + other sounds = 30 accepted samples. Collection alone does not train a profile: finish with Save profile & enable actions. Raw audio is never saved.")
+    }
+    if (state.calibrationAvailable) Panel(Modifier.fillMaxWidth()) {
+        Eyebrow("2 · Make a sound, then label it")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AcousticClass.entries.forEach { label ->
+                Text("${label.sampleLabel()}  ${state.sampleCounts[label] ?: 0}/${state.calibrationMinimumSamples}", fontSize = 12.sp,
+                    color = if ((state.sampleCounts[label] ?: 0) >= state.calibrationMinimumSamples) Accent else Muted,
+                    modifier = Modifier.weight(1f).testTag("calibration-count-${label.name}"))
+            }
+        }
+        val suggestedClass = AcousticClass.entries.firstOrNull { (state.sampleCounts[it] ?: 0) < state.calibrationMinimumSamples }
+        val instruction = when (suggestedClass) {
+            AcousticClass.CLAP -> "Try ONE handclap. A question will appear when the sound is captured."
+            AcousticClass.SNAP -> "Try ONE finger snap. A question will appear when the sound is captured."
+            AcousticClass.NEGATIVE -> "Try another sound: a key press, mouse click or desk tap. Label it Other sounds."
+            null -> "All three classes have enough examples. Validate and save below."
         }
         val candidate = state.candidate
-        if (candidate != null) {
-            Waveform(candidate.waveform)
-            Hint("${"%.0f".format(candidate.features.durationMs)} ms · centroid ${"%.2f".format(candidate.features.centroid)} × Nyquist · crest ${"%.1f".format(candidate.features.crestFactor)}\nPredicted ${candidate.classification.name.lowercase()} · ${(candidate.confidence * 100).toInt()}% confidence")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AcousticClass.entries.forEach { label -> OutlinedButton(onClick = { controller.acceptCandidate(label) }, enabled = !state.training) { Text("Accept ${label.name.lowercase()}", fontSize = 11.sp) } }
-                TextButton(onClick = controller::rejectCandidate, enabled = !state.training) { Text("Reject", fontSize = 11.sp) }
+        Text(when {
+            !state.calibrating && state.readyToTrain -> "Collection complete · ready to validate and save"
+            !state.calibrating -> "Session paused · accepted samples are kept"
+            !state.listening -> "Microphone is paused · enable monitoring to continue"
+            state.calibrationWaitingMs > 0 -> "Get ready · waiting for button noise to settle…"
+            candidate != null -> "Sound captured · waiting for your answer"
+            else -> instruction
+        }, color = Accent, fontSize = 14.sp, modifier = Modifier.testTag("calibration-feedback"))
+        Hint("Collection waits while the question is open. Further sounds cannot replace the captured example. After your answer, wait for button noise to settle before making another sound.")
+        Hint("If the live meter moves but no sample appears, try a closer, clearer sound and increase onset sensitivity in Audio input. Leave silence between sounds.")
+        TextButton(onClick = controller::undoLastSample, enabled = state.sampleCounts.values.sum() > 0 && !state.training, modifier = Modifier.testTag("calibration-undo")) { Text("Undo last") }
+    }
+    val captured = state.candidate
+    if (state.calibrating && captured != null) AlertDialog(
+        modifier = Modifier.testTag("calibration-label-dialog"),
+        onDismissRequest = controller::rejectCandidate,
+        buttons = {
+            // One normal column avoids AlertDialog's text-baseline positioning pulling the
+            // waveform above the heading when the first text follows a non-text visual.
+            Column(Modifier.width(540.dp).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("What was that sound?", style = MaterialTheme.typography.h6)
+                Waveform(captured.waveform)
+                Text("Sample captured · collection is waiting for your answer.", color = Accent)
+                Hint(state.calibrationProgress)
+                Hint("Label what you actually made. Choose Other sounds for typing, clicks or taps; Discard if unsure.")
+                Hint("${"%.0f".format(captured.features.durationMs)} ms · ${(captured.confidence * 100).toInt()}% diagnostic score. Desktop actions stay suspended.")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AcousticClass.entries.forEach { label ->
+                        OutlinedButton(onClick = { controller.acceptCandidate(label) }, enabled = !state.training,
+                            modifier = Modifier.weight(1f).testTag("calibration-label-${label.name}")) { Text("${label.sampleLabel()} ${state.sampleCounts[label] ?: 0}/${state.calibrationMinimumSamples}", fontSize = 11.sp) }
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    TextButton(onClick = controller::endCalibration, modifier = Modifier.testTag("calibration-pause-review")) { Text("Pause session") }
+                    TextButton(onClick = controller::rejectCandidate, modifier = Modifier.testTag("calibration-discard")) { Text("Discard sample") }
+                }
             }
-        } else Hint(if (state.calibrating) "Waiting for a transient. Leave a short silence between examples." else "Start a session to collect microphone samples.")
-    }
+        },
+    )
     Panel(Modifier.fillMaxWidth()) {
-        Eyebrow("2 · Validate and use")
-        Hint("Validation holds out examples and reports a confusion matrix. A profile must reach at least 80% precision and recall per class, with at most 10% false positives. Failed validation keeps the previous profile. Test again with fresh recordings.")
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(onClick = controller::trainProfile, enabled = state.sampleCounts.isNotEmpty() && !state.training) { Text(if (state.training) "Validating…" else "Validate & save profile") }
-            TextButton(onClick = { chooseProfile(false)?.let(controller::importProfile) }) { Text("Import") }
-            TextButton(onClick = { chooseProfile(true)?.let(controller::exportProfile) }, enabled = state.profileName != null) { Text("Export") }
+        Eyebrow("3 · Validate, save and try it")
+        val missing = AcousticClass.entries.mapNotNull { label ->
+            val remaining = state.calibrationMinimumSamples - (state.sampleCounts[label] ?: 0)
+            if (remaining > 0) "$remaining ${label.sampleLabel().lowercase()}" else null
         }
-        Hint("Profile for this input: ${state.activeProfileName ?: "None · conservative default classifier"}")
+        if (!state.readyToTrain) Hint("Still needed: ${missing.joinToString(", ")}. Collect all three classes before saving.")
+        Hint("This button checks your samples, saves the profile, and enables automatic desktop actions. Failed validation shows the reason and keeps actions paused. Safe recognition testing remains optional.")
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Button(onClick = controller::trainProfile, enabled = state.readyToTrain && !state.training, modifier = Modifier.testTag("calibration-train")) { Text(if (state.training) "Validating…" else "Save profile & enable actions") }
+            TextButton(onClick = { chooseProfile(false)?.let(controller::importProfile) }, enabled = !state.training && !state.calibrating) { Text("Import") }
+            TextButton(onClick = { chooseProfile(true)?.let(controller::exportProfile) }, enabled = state.profileName != null && !state.training) { Text("Export") }
+        }
+        Hint("Profile for this input: ${state.activeProfileName ?: "None · default classifier"}")
         state.validation?.let { report -> Text(report, fontSize = 11.sp, color = Muted, lineHeight = 17.sp) }
+        OutlinedButton(onClick = controller::toggleRecognitionTest, enabled = state.listening && !state.calibrating && !state.training, modifier = Modifier.testTag("recognition-test-toggle")) {
+            Text(if (state.testingRecognition) "Finish test · enable desktop actions" else "Test recognition safely")
+        }
+        if (state.testingRecognition) {
+            Hint("Desktop actions are suspended. Try TWO claps within the interval, or ONE finger snap. Results appear below and in Activity.", Accent)
+            Text(state.lastAcousticEvent, fontSize = 13.sp, modifier = Modifier.testTag("recognition-feedback"))
+            Text(state.lastGesture, color = Accent, fontSize = 14.sp)
+        }
     }
+    if (resetDialog) AlertDialog(onDismissRequest = { resetDialog = false }, title = { Text("Reset collected examples?") },
+        text = { Text("This clears the current session's accepted features. Your saved calibration profile is kept.") },
+        confirmButton = { Button(onClick = { controller.resetCalibration(); resetDialog = false }) { Text("Reset samples") } },
+        dismissButton = { TextButton(onClick = { resetDialog = false }) { Text("Keep samples") } })
+}
+
+private fun AcousticClass.sampleLabel() = when (this) {
+    AcousticClass.CLAP -> "Handclap"
+    AcousticClass.SNAP -> "Finger snap"
+    AcousticClass.NEGATIVE -> "Other sounds"
 }
 
 private fun chooseProfile(save: Boolean): Path? {

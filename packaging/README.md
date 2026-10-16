@@ -2,7 +2,7 @@
 
 Все команды ниже выполняются из корня проекта. Сборка требует установленный JDK 25, интернет для Gradle/Maven dependencies и сборку на целевой ОС. Используется Gradle wrapper из исходников. `createDistributable` создаёт приложение с собственным runtime: конечному пользователю отдельная Java не нужна. Исходники не загружаются из Git или с несуществующего release URL.
 
-Версия рецепта и имён архивов — `0.1.0`; при выпуске её нужно менять вместе с версией Gradle. `CLAPCTRL_VERSION` меняет имя архива и не подменяет metadata приложения.
+Версия рецепта и имён архивов — `0.1.2`; при выпуске её нужно менять вместе с версией Gradle. `CLAPCTRL_VERSION` меняет имя архива и не подменяет metadata приложения.
 
 ## Arch Linux / Omarchy
 
@@ -18,7 +18,7 @@ makepkg --dir packaging/arch
 Для установки выберите созданный файл для своей архитектуры:
 
 ```sh
-sudo pacman -U ./packaging/arch/clapctrl-0.1.0-1-x86_64.pkg.tar.zst
+sudo pacman -U ./packaging/arch/clapctrl-0.1.2-1-x86_64.pkg.tar.zst
 clapctrl
 ```
 
@@ -61,7 +61,7 @@ bash packaging/linux/build-portable.sh
 .\packaging\windows\build-portable.ps1
 ```
 
-Скрипт использует `JAVA_HOME` или `java.exe` из `PATH`, запускает тесты и `createDistributable`, затем сохраняет полный runtime image в `packaging/dist/clapctrl-0.1.0-windows-x86_64.zip` с SHA256 sidecar. `-PackageOnly` архивирует уже созданный image. JDK 25 нужен для сборки; WiX для portable ZIP не требуется. Для MSI отдельно выполните `gradlew.bat :app-desktop:packageMsi` в окружении Windows с инструментами, требуемыми `jpackage`.
+Скрипт использует `JAVA_HOME` или `java.exe` из `PATH`, запускает тесты и `createDistributable`, затем сохраняет полный runtime image в `packaging/dist/clapctrl-0.1.2-windows-x86_64.zip` с SHA256 sidecar. `-PackageOnly` архивирует уже созданный image; `-ImageDirectory <путь>` позволяет выбрать отдельную подготовленную сборку. JDK 25 нужен для сборки; WiX для portable ZIP не требуется. Для MSI отдельно выполните `gradlew.bat :app-desktop:packageMsi` в окружении Windows с инструментами, требуемыми `jpackage`. Свойство Gradle `-Pclapctrl.outputDir=out/action-fix-binaries` сохраняет новый image отдельно, когда прежняя версия запущена.
 
 Проверьте архив через `Get-FileHash -Algorithm SHA256`, распакуйте целиком и запустите `ClapCtrl\ClapCtrl.exe`. Не перемещайте один `.exe` отдельно от остальных файлов. Для удаления закройте приложение и удалите распакованную папку; пользовательские настройки сохранятся. Подпись и Windows SmartScreen reputation в этот workflow не входят. Сборка и проверка MSI установщика не считаются выполненными этим ZIP workflow.
 
@@ -72,9 +72,9 @@ bash packaging/linux/build-portable.sh
 ```sh
 SOURCE_DATE_EPOCH=0 bash packaging/source-archive.sh
 cd packaging/dist
-sha256sum -c clapctrl-0.1.0-source.tar.gz.sha256
-tar -xzf clapctrl-0.1.0-source.tar.gz
-cd clapctrl-0.1.0
+sha256sum -c clapctrl-0.1.2-source.tar.gz.sha256
+tar -xzf clapctrl-0.1.2-source.tar.gz
+cd clapctrl-0.1.2
 makepkg --dir packaging/arch
 ```
 

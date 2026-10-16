@@ -27,7 +27,10 @@ class CalibrationSession(
     fun remove(index: Int) { accepted.removeAt(index) }
     fun clear() { accepted.clear() }
     fun train(): CalibrationProfile = CalibrationTrainer.train(samples, microphoneId, profileName, minimumSamplesPerClass)
-    fun evaluate(folds: Int = 5): EvaluationReport = CalibrationEvaluation.crossValidate(samples, folds)
+    fun evaluate(
+        folds: Int = 5,
+        confidenceThresholds: Map<AcousticClass, Double> = CalibrationEvaluation.defaultConfidenceThresholds,
+    ): EvaluationReport = CalibrationEvaluation.crossValidate(samples, folds, confidenceThresholds)
 }
 
 object CalibrationTrainer {
@@ -76,9 +79,36 @@ data class EvaluationReport(
 )
 
 object CalibrationEvaluation {
+    val defaultConfidenceThresholds: Map<AcousticClass, Double> = mapOf(
+        AcousticClass.CLAP to 0.75,
+        AcousticClass.SNAP to 0.75,
+    )
+
+    internal fun validateThresholds(confidenceThresholds: Map<AcousticClass, Double>) {
+        require(confidenceThresholds.keys.containsAll(listOf(AcousticClass.CLAP, AcousticClass.SNAP))) {
+            "Confidence thresholds are required for CLAP and SNAP"
+        }
+        require(confidenceThresholds.values.all { it.isFinite() && it in 0.0..1.0 }) {
+            "Confidence thresholds must be finite values between 0 and 1"
+        }
+    }
+
+    /** Same acceptance boundary as production dispatch; rejected positives are missed events. */
+    internal fun deployedClass(
+        classification: AcousticClass,
+        confidence: Double,
+        confidenceThresholds: Map<AcousticClass, Double>,
+    ): AcousticClass = if (classification == AcousticClass.NEGATIVE || !confidence.isFinite() || confidence <= 0.0 ||
+        confidence < confidenceThresholds.getValue(classification)) AcousticClass.NEGATIVE else classification
+
     /** Every fold learns scaling and centroids exclusively from its training subset. */
-    fun crossValidate(samples: List<CalibrationSample>, requestedFolds: Int = 5): EvaluationReport {
+    fun crossValidate(
+        samples: List<CalibrationSample>,
+        requestedFolds: Int = 5,
+        confidenceThresholds: Map<AcousticClass, Double> = defaultConfidenceThresholds,
+    ): EvaluationReport {
         require(requestedFolds in 2..20) { "Cross-validation needs 2–20 folds" }
+        validateThresholds(confidenceThresholds)
         val groups = AcousticClass.entries.associateWith { label -> samples.filter { it.label == label }.shuffled(Random(42 + label.ordinal)) }
         val minimumCount = groups.values.minOf { it.size }
         require(minimumCount >= 2) { "Validation needs at least two separate samples of every class" }
@@ -88,9 +118,14 @@ object CalibrationEvaluation {
             val training = groups.values.flatMap { group -> group.filterIndexed { index, _ -> index % folds != fold } }
             val validation = groups.values.flatMap { group -> group.filterIndexed { index, _ -> index % folds == fold } }
             val classifier = CalibrationClassifier(CalibrationTrainer.train(training, "validation", "held-out fold", 1))
-            validation.forEach { results += it.label to classifier.classifyVector(it.vector).first }
+            validation.forEach {
+                val (predicted, confidence) = classifier.classifyVector(it.vector)
+                results += it.label to deployedClass(predicted, confidence, confidenceThresholds)
+            }
         }
-        return summarize(results, folds)
+        return summarize(results, folds).copy(note = "Held-out feature classification with deployed confidence thresholds: " +
+            "CLAP ${confidenceThresholds.getValue(AcousticClass.CLAP)}, SNAP ${confidenceThresholds.getValue(AcousticClass.SNAP)}. " +
+            "Rejected positives count as NEGATIVE. Onset recall, double-clap pairing and action latency require separate recording evaluation.")
     }
 
     fun summarize(results: List<Pair<AcousticClass, AcousticClass>>, folds: Int = 0): EvaluationReport {

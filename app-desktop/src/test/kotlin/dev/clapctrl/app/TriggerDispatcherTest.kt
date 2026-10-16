@@ -117,4 +117,22 @@ class TriggerDispatcherTest {
         assertTrue(dispatcher.dispatch(detection(), clap)!!.success)
         assertEquals(1, adapter.executions.size)
     }
+
+    @Test fun `skipped detections explain disabled threshold and cooldown while successful dispatch stays distinct`(): Unit = runBlocking {
+        val adapter = Adapter()
+        val dispatcher = TriggerDispatcher(adapter)
+        val reasons = mutableListOf<String>()
+        assertNull(dispatcher.dispatch(detection(), clap.copy(enabled = false), onSkipped = { reasons += it }))
+        assertTrue(reasons.single().contains("switched off"))
+        assertNull(dispatcher.dispatch(detection(confidence = 0.79), clap, onSkipped = { reasons += it }))
+        assertTrue(reasons.last().contains("80% threshold"))
+        assertTrue(adapter.executions.isEmpty())
+        assertTrue(dispatcher.dispatch(detection(), clap, onSkipped = { reasons += it })!!.success)
+        assertEquals(2, reasons.size, "A real action result must not be reported as a skipped event")
+        assertNull(dispatcher.dispatch(detection(time = 1100), clap, onSkipped = { reasons += it }))
+        assertTrue(reasons.last().contains("Cooldown") && reasons.last().contains("900 ms"))
+        assertTrue(dispatcher.dispatch(detection(time = 2000), clap, onSkipped = { reasons += it })!!.success)
+        assertEquals(3, reasons.size)
+        assertEquals(listOf(clap.action, clap.action), adapter.executions.toList())
+    }
 }

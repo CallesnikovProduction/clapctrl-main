@@ -9,14 +9,17 @@ class TriggerDispatcher(private val adapter: PlatformAdapter) {
     private val gate = Mutex()
     private val lastRun = mutableMapOf<Gesture, Long>()
 
-    suspend fun dispatch(detection: Detection, trigger: TriggerConfiguration, manual: Boolean = false): ActionResult? {
+    suspend fun dispatch(detection: Detection, trigger: TriggerConfiguration, manual: Boolean = false, onSkipped: (String) -> Unit = {}): ActionResult? {
         if (detection.gesture != trigger.gesture) return null
         if (!detection.confidence.isFinite() || detection.confidence !in 0.0..1.0) return null
-        if (!manual && (!trigger.enabled || detection.confidence < trigger.confidence)) return null
+        if (!manual && !trigger.enabled) { onSkipped("${trigger.gesture.label()} trigger is switched off"); return null }
+        if (!manual && detection.confidence < trigger.confidence) { onSkipped("Sound below ${(trigger.confidence * 100).toInt()}% threshold"); return null }
         if (!gate.tryLock()) return ActionResult(false, "Another action is running; event skipped")
         try {
             val previous = lastRun[trigger.gesture]
-            if (!manual && previous != null && detection.timestampMs - previous < trigger.cooldownMs) return null
+            if (!manual && previous != null && detection.timestampMs - previous < trigger.cooldownMs) {
+                onSkipped("Cooldown · wait ${trigger.cooldownMs - (detection.timestampMs - previous)} ms"); return null
+            }
             lastRun[trigger.gesture] = detection.timestampMs
             return adapter.execute(trigger.action)
         } catch (cancelled: CancellationException) {

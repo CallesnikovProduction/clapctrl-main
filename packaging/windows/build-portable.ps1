@@ -1,9 +1,9 @@
 [CmdletBinding()]
-param([switch]$PackageOnly)
+param([switch]$PackageOnly, [string]$ImageDirectory)
 $ErrorActionPreference = 'Stop'
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
 if ($env:OS -ne 'Windows_NT') { throw 'Build the Windows distribution on Windows.' }
-$packageVersion = if ($env:CLAPCTRL_VERSION) { $env:CLAPCTRL_VERSION } else { '0.1.0' }
+$packageVersion = if ($env:CLAPCTRL_VERSION) { $env:CLAPCTRL_VERSION } else { '0.1.2' }
 if ($packageVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'CLAPCTRL_VERSION must be x.y.z' }
 $env:GRADLE_USER_HOME = Join-Path $repositoryRoot '.gradle-user-home'
 if (-not $PackageOnly) {
@@ -12,7 +12,7 @@ if (-not $PackageOnly) {
     & $javaExecutable '-classpath' $wrapperJar 'org.gradle.wrapper.GradleWrapperMain' '-p' $repositoryRoot '--no-daemon' 'test' ':app-desktop:createDistributable'
     if ($LASTEXITCODE -ne 0) { throw "Gradle failed with exit code $LASTEXITCODE" }
 }
-$applicationImage = Join-Path $repositoryRoot 'app-desktop/build/compose/binaries/main/app/ClapCtrl'
+$applicationImage = if ($ImageDirectory) { (Resolve-Path -LiteralPath $ImageDirectory).Path } else { Join-Path $repositoryRoot 'app-desktop/build/compose/binaries/main/app/ClapCtrl' }
 if (-not (Test-Path -LiteralPath (Join-Path $applicationImage 'ClapCtrl.exe') -PathType Leaf)) { throw "Missing Windows application image: $applicationImage" }
 $outputDirectory = Join-Path $repositoryRoot 'packaging/dist'
 [void][System.IO.Directory]::CreateDirectory($outputDirectory)

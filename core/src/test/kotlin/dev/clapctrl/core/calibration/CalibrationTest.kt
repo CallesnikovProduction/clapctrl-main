@@ -116,4 +116,64 @@ class CalibrationTest {
         val classifier = CalibrationClassifier(train())
         assertEquals(AcousticClass.NEGATIVE, classifier.classifyVector(List(9) { 1000.0 }).first)
     }
+
+    @Test fun `classes separated in one feature exceed deployed confidence at their prototypes`() {
+        // Regression: absolute-distance softmax gave only about 0.53–0.61 for these exact
+        // prototypes, despite perfect separation, so default production triggers rejected all.
+        val training = narrowSamples(List(6) { 0.0 })
+        val classifier = CalibrationClassifier(CalibrationTrainer.train(training, "mic", "one informative feature"))
+        AcousticClass.entries.forEach { label ->
+            val (predicted, confidence) = classifier.classifyVector(oneFeature(label.ordinal.toDouble()))
+            assertEquals(label, predicted)
+            assertEquals(1.0, confidence, 1e-12)
+        }
+        val heldOut = CalibrationEvaluation.crossValidate(narrowSamples(listOf(-0.02, -0.01, 0.0, 0.01, 0.02, 0.03)))
+        assertEquals(1.0, heldOut.accuracy)
+    }
+
+    @Test fun `ambiguous classification has low margin and is rejected at deployed threshold`() {
+        val classifier = CalibrationClassifier(CalibrationTrainer.train(narrowSamples(List(6) { 0.0 }), "mic", "test"))
+        val (predicted, confidence) = classifier.classifyVector(oneFeature(0.45))
+        assertEquals(AcousticClass.CLAP, predicted)
+        assertTrue(confidence < 0.25)
+        assertEquals(AcousticClass.NEGATIVE, CalibrationEvaluation.deployedClass(predicted, confidence, CalibrationEvaluation.defaultConfidenceThresholds))
+    }
+
+    @Test fun `identical prototypes have zero confidence instead of an arbitrary positive winner`() {
+        val training = AcousticClass.entries.flatMap { label -> List(6) { CalibrationSample(label, List(9) { 0.5 }) } }
+        val classifier = CalibrationClassifier(CalibrationTrainer.train(training, "mic", "test"))
+        val (_, confidence) = classifier.classifyVector(List(9) { 0.5 })
+        assertEquals(0.0, confidence)
+        assertEquals(AcousticClass.NEGATIVE, CalibrationEvaluation.deployedClass(AcousticClass.CLAP, confidence, CalibrationEvaluation.defaultConfidenceThresholds))
+    }
+
+    @Test fun `held out validation counts confidence rejected positives as missed events`() {
+        val training = narrowSamples(listOf(-0.3, -0.2, -0.1, 0.1, 0.2, 0.3))
+        val argmax = CalibrationEvaluation.crossValidate(training, 3, mapOf(AcousticClass.CLAP to 0.0, AcousticClass.SNAP to 0.0))
+        val deployed = CalibrationEvaluation.crossValidate(training, 3)
+        assertEquals(1.0, argmax.accuracy)
+        assertTrue(deployed.accuracy!! < argmax.accuracy!!)
+        assertTrue(deployed.confusion.getValue("CLAP").getValue("NEGATIVE") > 0)
+        assertTrue(deployed.confusion.getValue("SNAP").getValue("NEGATIVE") > 0)
+    }
+
+    @Test fun `validation honors independent clap and snap trigger thresholds`() {
+        val report = CalibrationEvaluation.crossValidate(
+            narrowSamples(listOf(-0.3, -0.2, -0.1, 0.1, 0.2, 0.3)), 3,
+            mapOf(AcousticClass.CLAP to 0.99, AcousticClass.SNAP to 0.0),
+        )
+        assertEquals(0.0, report.perClass.getValue("CLAP").recall)
+        assertEquals(1.0, report.perClass.getValue("SNAP").recall)
+        assertTrue(report.note.contains("CLAP 0.99, SNAP 0.0"))
+    }
+
+    @Test fun `invalid or missing deployed thresholds fail explicitly`() {
+        assertFailsWith<IllegalArgumentException> { CalibrationEvaluation.crossValidate(samples(), confidenceThresholds = emptyMap()) }
+        assertFailsWith<IllegalArgumentException> { CalibrationEvaluation.crossValidate(samples(), confidenceThresholds = mapOf(AcousticClass.CLAP to Double.NaN, AcousticClass.SNAP to 0.75)) }
+    }
+
+    private fun oneFeature(value: Double): List<Double> = List(9) { if (it == 0) value else 0.5 }
+    private fun narrowSamples(jitter: List<Double>) = AcousticClass.entries.flatMap { label ->
+        jitter.mapIndexed { index, variation -> CalibrationSample(label, oneFeature(label.ordinal + variation), index.toLong()) }
+    }
 }

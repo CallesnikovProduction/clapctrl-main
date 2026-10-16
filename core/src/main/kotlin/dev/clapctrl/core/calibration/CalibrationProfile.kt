@@ -14,7 +14,6 @@ import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.encodeToString
 import java.nio.file.Path
-import kotlin.math.exp
 import kotlin.math.sqrt
 
 const val PIPELINE_SIGNATURE = "clapctrl-features-v1-nine-normalized"
@@ -103,9 +102,12 @@ class CalibrationClassifier(private val profile: CalibrationProfile) : AcousticC
         }
         val nearest = distances.minBy { it.second }
         if (nearest.second > 5.0) return AcousticClass.NEGATIVE to 1.0
-        // This is a relative distance score, not a calibrated probability of correctness.
-        val weights = distances.map { exp(-2.0 * (it.second - nearest.second)) }
-        val confidence = weights[distances.indexOf(nearest)] / weights.sum()
+        // Relative separation is independent of how many feature dimensions distinguish the
+        // classes. A softmax of absolute distances suppressed even exact class prototypes
+        // when only one of nine features was informative. Ties receive zero confidence.
+        // This margin is an interpretable score, not a probability of correctness.
+        val runnerUp = distances.filter { it.first.label != nearest.first.label }.minOf { it.second }
+        val confidence = if (runnerUp <= 1e-12) 0.0 else (1.0 - nearest.second / runnerUp).coerceIn(0.0, 1.0)
         return nearest.first.label to confidence
     }
 }

@@ -10,6 +10,8 @@ import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.*
 import dev.clapctrl.app.ui.*
+import dev.clapctrl.core.*
+import dev.clapctrl.platform.JavaSoundCapture
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -47,11 +49,16 @@ fun main(args: Array<String>) {
         System.err.println("ClapCtrl is already running for $directory. Reopen it from the system tray.")
         lockChannel.close(); return
     }
-    val controller = AppController(directory)
+    val capture = JavaSoundCapture()
+    val controller = AppController(directory, capture)
     val smokeDirectory = args.firstOrNull { it.startsWith("--ui-smoke=") }?.substringAfter('=')?.let(Path::of)
     val hardwareSmoke = "--hardware-smoke" in args
+    val screenshotSmoke = "--screenshot-smoke" in args
     require(!hardwareSmoke || (smokeDirectory != null && args.any { it.startsWith("--data-dir=") })) {
         "Hardware diagnostics require --ui-smoke and a separate explicit --data-dir"
+    }
+    require(!screenshotSmoke || (smokeDirectory != null && args.any { it.startsWith("--data-dir=") })) {
+        "Screenshot action diagnostics require --ui-smoke and a separate explicit --data-dir"
     }
     try {
         application {
@@ -83,7 +90,10 @@ fun main(args: Array<String>) {
                 state = windowState, title = "ClapCtrl — Sound-driven desktop automation", visible = visible,
                 icon = AppIcon(state.listening),
             ) {
-                LaunchedEffect(Unit) { window.minimumSize = Dimension(920, 680) }
+                LaunchedEffect(Unit) {
+                    window.minimumSize = Dimension(920, 680)
+                    if (smokeDirectory != null) window.isAlwaysOnTop = true
+                }
                 if (visible) Dashboard(controller, requestMonitoring = toggle, pageOverride = smokePage)
                 if (consentDialog) ClapTheme {
                     AlertDialog(onDismissRequest = { consentDialog = false },
@@ -107,6 +117,21 @@ fun main(args: Array<String>) {
                         withTimeout(5000) { while (controller.state.value.configuration.triggers.any { it.enabled }) delay(20) }
                         controller.enableWithConsent()
                         withTimeout(12000) { while (!controller.state.value.listening || controller.state.value.framesProcessed < 30) delay(20) }
+                        val firstInputMs = controller.state.value.inputOpenedInMs
+                        controller.updateConfiguration { it.copy(detector = it.detector.copy(sensitivity = 0.55)) }
+                        withTimeout(5000) { while (controller.state.value.configuration.detector.sensitivity != 0.55) delay(20) }
+                        controller.beginCalibration(10)
+                        withTimeout(5000) { while (!controller.state.value.calibrating) delay(20) }
+                        val collectionStart = controller.state.value.framesProcessed
+                        withTimeout(5000) { while (controller.state.value.framesProcessed < collectionStart + 40) delay(20) }
+                        controller.endCalibration()
+                        withTimeout(5000) { while (controller.state.value.calibrating || !controller.state.value.testingRecognition) delay(20) }
+                        controller.resumeCalibration()
+                        check(controller.state.value.calibrating) { "Calibration did not resume" }
+                        controller.resetCalibration()
+                        check(!controller.state.value.calibrationAvailable && controller.state.value.testingRecognition)
+                        check(capture.lastCaptureDiagnostics() == null) { "Live settings/calibration unexpectedly closed the microphone" }
+                        println("LIVE_INPUT_PASS: first PCM ${firstInputMs} ms; live settings, calibration start/pause/resume/reset used one continuous capture.")
                     }
                     delay(3500)
                     for (page in Page.entries) {
@@ -126,6 +151,17 @@ fun main(args: Array<String>) {
                     visible = true
                     delay(500)
                     check(window.isVisible) { "Window failed to reopen" }
+                    if (screenshotSmoke) {
+                        controller.testAction(TriggerConfiguration(Gesture.FINGER_SNAP, action = ActionConfiguration(ActionType.SCREENSHOT)))
+                        val result = withTimeout(15000) {
+                            while (controller.state.value.activity.none { it.title == "Action test · Take screenshot" }) delay(20)
+                            controller.state.value.activity.first { it.title == "Action test · Take screenshot" }
+                        }
+                        check(result.success) { result.detail }
+                        val images = Files.list(directory.resolve("screenshots")).use { paths -> paths.filter { it.toString().endsWith(".png") }.toList() }
+                        check(images.isNotEmpty() && images.all { ImageIO.read(it.toFile())?.width?.let { width -> width > 0 } == true })
+                        println("SCREENSHOT_SMOKE_PASS: controller action reached actual OS backend; valid PNG saved under ${directory.resolve("screenshots")}; ${result.detail}")
+                    }
                     if (hardwareSmoke) {
                         controller.pause()
                         withTimeout(5000) { while (controller.state.value.listening || controller.state.value.starting) delay(20) }

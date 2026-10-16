@@ -1,6 +1,7 @@
 package dev.clapctrl.core.dsp
 
 import dev.clapctrl.core.AcousticCandidate
+import dev.clapctrl.core.AcousticClass
 import dev.clapctrl.core.AudioFrame
 import dev.clapctrl.core.Detection
 import dev.clapctrl.core.DetectorSettings
@@ -37,9 +38,13 @@ class AcousticPipeline(
     private var eventSize = 0
     private var eventStartMs = 0L
     private var lastOnsetMs: Long? = null
+    private var skipPartialBlock = false
 
-    fun process(frame: AudioFrame): PipelineOutput {
+    fun process(frame: AudioFrame, confidenceThresholds: Map<AcousticClass, Double> = emptyMap()): PipelineOutput {
         require(frame.sampleRate in 8_000..192_000) { "Sample rate must be 8000–192000 Hz" }
+        require(confidenceThresholds.values.all { it.isFinite() && it in 0.0..1.0 }) {
+            "Confidence thresholds must be finite values between 0 and 1"
+        }
         val frameRms = energy(frame.samples)
         val previous = previousFrameMs
         // Old frames must never pair a stale clap with a newer one or rewind detector time.
@@ -60,7 +65,13 @@ class AcousticPipeline(
                 val completed = processBlock(blockMs)
                 if (completed != null) {
                     candidate = completed
-                    detections += recognizer.accept(completed)
+                    // Keep the raw classification for collection/diagnostics, but prevent an
+                    // ineligible clap from consuming the first good clap of a genuine pair.
+                    val temporalClass = if (completed.classification != AcousticClass.NEGATIVE &&
+                        completed.confidence < (confidenceThresholds[completed.classification] ?: 0.0)) {
+                        AcousticClass.NEGATIVE
+                    } else completed.classification
+                    detections += recognizer.accept(temporalClass, completed.confidence, completed.timestampMs)
                 }
                 blockPosition = 0
             }
@@ -75,6 +86,10 @@ class AcousticPipeline(
         var peak = 0.0
         for (sample in block) peak = max(peak, abs(sample.toDouble()))
         val spectral = spectrum!!.analyze(block, block.size)
+        if (skipPartialBlock) {
+            skipPartialBlock = false
+            return null
+        }
         val onsetMultiplier = 8.0 - settings.sensitivity * 5.0
         val onsetThreshold = max(MIN_ONSET_RMS, noise * onsetMultiplier)
         val releaseThreshold = max(MIN_ONSET_RMS * 0.45, noise * 1.8)
@@ -154,12 +169,28 @@ class AcousticPipeline(
         quietBlocks = 0
         eventSize = 0
         lastOnsetMs = null
+        skipPartialBlock = false
         spectrum?.reset()
         recognizer.reset()
     }
 
     /** Call when pausing, changing profiles or restarting a microphone stream. */
     fun reset() { clearState() }
+
+    /**
+     * Change a collection/recognition boundary without reopening capture or forgetting ambient
+     * noise. Wait for a quiet release so an already sounding clap cannot become a new event.
+     * Partial blocks retain stream alignment but cannot seed recognition across the boundary.
+     */
+    fun resetRecognition() {
+        active = false
+        waitingForQuiet = true
+        quietBlocks = 0
+        eventSize = 0
+        lastOnsetMs = null
+        skipPartialBlock = blockPosition > 0
+        recognizer.reset()
+    }
 
     private fun energy(samples: FloatArray): Double {
         if (samples.isEmpty()) return 0.0

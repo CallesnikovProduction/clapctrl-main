@@ -23,7 +23,8 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi, TargetFormat.Deb, TargetFormat.Rpm)
             packageName = "ClapCtrl"
-            packageVersion = "0.1.0"
+            packageVersion = "0.1.2"
+            providers.gradleProperty("clapctrl.outputDir").orNull?.let { outputBaseDir.set(rootProject.file(it)) }
             description = "Local acoustic desktop automation"
             vendor = "ClapCtrl contributors"
             copyright = "Copyright 2026 ClapCtrl contributors"

@@ -26,6 +26,8 @@ class AppControllerTest {
         val active = AtomicInteger()
         val maximumActive = AtomicInteger()
         val processedFrames = AtomicInteger()
+        var nextTimestampMs: Long = 0
+            private set
         val selectedDevices = CopyOnWriteArrayList<String>()
         private val frames = Channel<AudioFrame>(16)
         override fun listDevices() = listOf(AudioInputDevice("default", "Test microphone"), AudioInputDevice("usb", "USB microphone"))
@@ -42,8 +44,8 @@ class AppControllerTest {
             } finally { active.decrementAndGet() }
         }
         override fun stop() { stops.incrementAndGet() }
-        suspend fun emit(timestamp: Long = 100) = frames.send(AudioFrame(FloatArray(480) { 0.01f }, 48000, timestamp))
-        suspend fun emit(frame: AudioFrame) = frames.send(frame)
+        suspend fun emit(timestamp: Long = 100) = emit(AudioFrame(FloatArray(480) { 0.01f }, 48000, timestamp))
+        suspend fun emit(frame: AudioFrame) { frames.send(frame); nextTimestampMs = frame.timestampMs + frame.samples.size * 1000L / frame.sampleRate }
     }
 
     private class Adapter : PlatformAdapter {
@@ -59,7 +61,7 @@ class AppControllerTest {
         withTimeout(4000) { while (!condition()) delay(10) }
     }
 
-    private suspend fun emitSyntheticClaps(capture: Capture, onsets: List<Int>, startMs: Long = 0, durationMs: Int = 400) {
+    private suspend fun emitSyntheticClaps(capture: Capture, onsets: List<Int>, startMs: Long = capture.nextTimestampMs, durationMs: Int = 400) {
         val rate = 48000
         val samples = FloatArray(rate * durationMs / 1000)
         val targetProcessedFrames = capture.processedFrames.get() + (samples.size + 479) / 480
@@ -78,6 +80,25 @@ class AppControllerTest {
 
     private suspend fun emitSyntheticDoubleClap(capture: Capture) {
         emitSyntheticClaps(capture, listOf(200, 600), durationMs = 1200)
+    }
+
+    private suspend fun beginLiveCalibration(controller: AppController, capture: Capture) {
+        controller.enableWithConsent()
+        awaitCondition { capture.starts.get() == 1 }
+        capture.emit()
+        awaitCondition { controller.state.value.listening }
+        controller.beginCalibration(2)
+        awaitCondition { controller.state.value.calibrating }
+    }
+
+    private suspend fun readyClap(controller: AppController, capture: Capture) {
+        val quietUntil = controller.state.value.calibrationReadyAtMs + 20
+        if (capture.nextTimestampMs < quietUntil) {
+            val quietMs = (((quietUntil - capture.nextTimestampMs) + 9) / 10 * 10).toInt()
+            emitSyntheticClaps(capture, emptyList(), durationMs = quietMs)
+        }
+        emitSyntheticClaps(capture, listOf(50))
+        assertNotNull(controller.state.value.candidate)
     }
 
     private suspend fun configureSyntheticClapThreshold(controller: AppController) {
@@ -234,11 +255,8 @@ class AppControllerTest {
         val adapter = Adapter()
         val controller = AppController(directory, capture, adapter)
         try {
-            controller.beginCalibration(2)
-            awaitCondition { controller.state.value.calibrating }
-            controller.enableWithConsent()
-            awaitCondition { capture.starts.get() == 1 }
-            emitSyntheticDoubleClap(capture)
+            beginLiveCalibration(controller, capture)
+            readyClap(controller, capture)
             awaitCondition { controller.state.value.candidate != null }
             assertTrue(controller.state.value.candidate!!.waveform.isNotEmpty())
             assertTrue(adapter.executions.isEmpty())
@@ -249,6 +267,8 @@ class AppControllerTest {
             controller.endCalibration()
             awaitCondition { !controller.state.value.calibrating }
             assertFalse(controller.state.value.calibrating)
+            assertEquals(1, capture.starts.get())
+            assertEquals(0, capture.stops.get())
         } finally { controller.shutdown() }
     }
 
@@ -256,24 +276,22 @@ class AppControllerTest {
         val capture = Capture()
         val controller = AppController(directory, capture, Adapter())
         try {
-            controller.beginCalibration(2)
-            awaitCondition { controller.state.value.calibrating }
-            controller.enableWithConsent()
-            awaitCondition { capture.starts.get() == 1 }
-            emitSyntheticClaps(capture, listOf(200))
+            beginLiveCalibration(controller, capture)
+            readyClap(controller, capture)
             val first = assertNotNull(controller.state.value.candidate)
-            assertEquals(200L, first.timestampMs)
-            emitSyntheticClaps(capture, listOf(50), startMs = 400)
+            emitSyntheticClaps(capture, listOf(50))
             assertSame(first, controller.state.value.candidate)
             controller.rejectCandidate()
             assertNull(controller.state.value.candidate)
-            emitSyntheticClaps(capture, listOf(50), startMs = 800)
-            assertEquals(850L, controller.state.value.candidate?.timestampMs)
+            readyClap(controller, capture)
+            val rejectedReplacement = assertNotNull(controller.state.value.candidate)
+            assertTrue(rejectedReplacement.timestampMs > first.timestampMs)
+            assertTrue(rejectedReplacement.timestampMs >= controller.state.value.calibrationReadyAtMs)
             controller.acceptCandidate(AcousticClass.CLAP)
             assertNull(controller.state.value.candidate)
             assertEquals(1, controller.state.value.sampleCounts[AcousticClass.CLAP])
-            emitSyntheticClaps(capture, listOf(50), startMs = 1200)
-            assertEquals(1250L, controller.state.value.candidate?.timestampMs)
+            readyClap(controller, capture)
+            assertTrue(controller.state.value.candidate!!.timestampMs > rejectedReplacement.timestampMs)
             assertEquals(1, controller.state.value.sampleCounts[AcousticClass.CLAP])
         } finally { controller.shutdown() }
     }
@@ -284,22 +302,27 @@ class AppControllerTest {
         val controller = AppController(directory, capture, adapter)
         try {
             configureSyntheticClapThreshold(controller)
-            controller.beginCalibration(2)
-            awaitCondition { controller.state.value.calibrating }
-            controller.enableWithConsent()
-            awaitCondition { capture.starts.get() == 1 }
-            emitSyntheticClaps(capture, listOf(200))
-            assertEquals(200L, controller.state.value.candidate?.timestampMs)
+            beginLiveCalibration(controller, capture)
+            readyClap(controller, capture)
+            val priorOnset = controller.state.value.candidate!!.timestampMs
             controller.endCalibration()
-            awaitCondition { !controller.state.value.calibrating && capture.starts.get() == 2 }
-            emitSyntheticClaps(capture, listOf(50), startMs = 400)
+            awaitCondition { !controller.state.value.calibrating }
+            val firstLiveOnset = capture.nextTimestampMs + 50
+            assertTrue(controller.state.value.testingRecognition)
+            controller.resetCalibration()
+            controller.enableActions()
+            assertFalse(controller.state.value.testingRecognition)
+            assertTrue(firstLiveOnset - priorOnset in 150L..700L, "The boundary fixture must fall inside the clap matching interval")
+            emitSyntheticClaps(capture, listOf(50))
             assertEquals("No detections yet", controller.state.value.lastGesture)
             assertTrue(adapter.executions.isEmpty())
-            emitSyntheticClaps(capture, listOf(50), startMs = 800)
+            emitSyntheticClaps(capture, listOf(50))
             awaitCondition { controller.state.value.activity.any { it.title == "Double clap" } }
             assertEquals(listOf(ActionType.OPEN_TERMINAL), adapter.executions.map { it.type })
             assertSyntheticClapConfidence(controller.state.value)
             assertEquals(1, capture.maximumActive.get())
+            assertEquals(1, capture.starts.get())
+            assertEquals(0, capture.stops.get())
         } finally { controller.shutdown() }
     }
 
@@ -307,10 +330,7 @@ class AppControllerTest {
         val capture = Capture()
         val controller = AppController(directory, capture, Adapter())
         try {
-            controller.beginCalibration(2)
-            awaitCondition { controller.state.value.calibrating }
-            controller.enableWithConsent()
-            awaitCondition { capture.starts.get() == 1 }
+            beginLiveCalibration(controller, capture)
             val original = ConfigurationStore(directory.resolve("settings.json")).load()
             controller.updateConfiguration { it.copy(microphoneId = "usb") }
             awaitCondition { controller.state.value.error?.contains("End calibration") == true }
@@ -319,8 +339,7 @@ class AppControllerTest {
             assertTrue(controller.state.value.calibrating)
             assertEquals(listOf("default"), capture.selectedDevices.toList())
             assertEquals(1, capture.starts.get())
-            emitSyntheticClaps(capture, listOf(200))
-            assertNotNull(controller.state.value.candidate)
+            readyClap(controller, capture)
         } finally { controller.shutdown() }
     }
 
@@ -337,16 +356,12 @@ class AppControllerTest {
         val controller = AppController(directory, capture, adapter)
         try {
             awaitCondition { controller.state.value.activeProfileName == prior.name }
-            controller.beginCalibration(2)
-            awaitCondition { controller.state.value.calibrating }
-            controller.enableWithConsent()
-            awaitCondition { capture.starts.get() == 1 }
+            beginLiveCalibration(controller, capture)
             // The same actual PCM event is deliberately mislabeled as every class. Held-out
             // validation must reject this contradictory dataset rather than replace a profile.
             val labels = AcousticClass.entries.flatMap { label -> List(2) { label } }
-            for ((index, label) in labels.withIndex()) {
-                emitSyntheticClaps(capture, listOf(200), startMs = index * 400L)
-                assertNotNull(controller.state.value.candidate)
+            for (label in labels) {
+                readyClap(controller, capture)
                 controller.acceptCandidate(label)
             }
             assertEquals(AcousticClass.entries.associateWith { 2 }, controller.state.value.sampleCounts)
@@ -369,6 +384,145 @@ class AppControllerTest {
             awaitCondition { controller.state.value.activity.any { it.title == "Profile exported" && it.detail == exported.toString() } }
             assertEquals(prior, CalibrationProfileStore(exported).load())
             assertEquals(1, capture.starts.get())
+        } finally { controller.shutdown() }
+    }
+
+    @Test fun `calibration and save are guarded while input or complete class samples are missing`(): Unit = runBlocking {
+        val capture = Capture()
+        val controller = AppController(directory, capture, Adapter())
+        try {
+            assertEquals(10, controller.state.value.calibrationMinimumSamples)
+            controller.beginCalibration(2)
+            awaitCondition { controller.state.value.error?.contains("Enable monitoring") == true }
+            assertFalse(controller.state.value.calibrating)
+            assertFalse(controller.state.value.calibrationAvailable)
+            assertEquals(0, capture.starts.get())
+            controller.trainProfile()
+            assertFalse(controller.state.value.training)
+            assertFalse(controller.state.value.readyToTrain)
+            assertTrue(Files.notExists(directory.resolve("calibration.json")))
+        } finally { controller.shutdown() }
+    }
+
+    @Test fun `button settling rejects early onsets even when candidate emission follows deadline and later labels can be undone`(): Unit = runBlocking {
+        val capture = Capture()
+        val controller = AppController(directory, capture, Adapter())
+        try {
+            beginLiveCalibration(controller, capture)
+            val initialDeadline = controller.state.value.calibrationReadyAtMs
+            assertTrue(capture.nextTimestampMs + 300 < initialDeadline)
+            emitSyntheticClaps(capture, listOf(100, 300), durationMs = 600)
+            assertTrue(controller.state.value.lastAcousticEvent.startsWith("clap"))
+            assertNull(controller.state.value.candidate, "An onset before the settle deadline must not become a preview after emission")
+            readyClap(controller, capture)
+            assertEquals(AcousticClass.CLAP, controller.state.value.candidate!!.classification)
+            controller.rejectCandidate()
+            assertNull(controller.state.value.candidate)
+            val rejectionDeadline = controller.state.value.calibrationReadyAtMs
+            assertTrue(capture.nextTimestampMs + 300 < rejectionDeadline)
+            emitSyntheticClaps(capture, listOf(100, 300), durationMs = 600)
+            assertNull(controller.state.value.candidate)
+            readyClap(controller, capture)
+            controller.acceptCandidate(AcousticClass.SNAP)
+            assertEquals(mapOf(AcousticClass.SNAP to 1), controller.state.value.sampleCounts)
+            assertNull(controller.state.value.candidate)
+            assertFalse(controller.state.value.readyToTrain)
+            controller.undoLastSample()
+            assertTrue(controller.state.value.sampleCounts.isEmpty())
+            assertFalse(controller.state.value.readyToTrain)
+            assertEquals(1, capture.starts.get())
+            assertEquals(0, capture.stops.get())
+        } finally { controller.shutdown() }
+    }
+
+    @Test fun `action confidence cooldown and detector settings update live without reopening the microphone`(): Unit = runBlocking {
+        val capture = Capture()
+        val adapter = Adapter()
+        val controller = AppController(directory, capture, adapter)
+        try {
+            controller.enableWithConsent()
+            awaitCondition { capture.starts.get() == 1 }
+            capture.emit()
+            awaitCondition { controller.state.value.listening }
+            controller.updateConfiguration { it.copy(triggers = it.triggers.map { trigger ->
+                if (trigger.gesture == Gesture.DOUBLE_CLAP) trigger.copy(confidence = 0.5, cooldownMs = 2000,
+                    action = ActionConfiguration(ActionType.MEDIA_PLAY_PAUSE)) else trigger
+            }) }
+            awaitCondition { controller.state.value.configuration.triggers.first().action.type == ActionType.MEDIA_PLAY_PAUSE }
+            controller.updateConfiguration { it.copy(detector = it.detector.copy(sensitivity = 0.7)) }
+            awaitCondition { controller.state.value.configuration.detector.sensitivity == 0.7 }
+            emitSyntheticDoubleClap(capture)
+            awaitCondition { adapter.executions.size == 1 }
+            assertEquals(ActionType.MEDIA_PLAY_PAUSE, adapter.executions.single().type)
+            assertTrue(controller.state.value.listening)
+            assertEquals(1, capture.starts.get())
+            assertEquals(0, capture.stops.get())
+        } finally { controller.shutdown() }
+    }
+
+    @Test fun `recognition test reports real PCM events without OS actions and live dispatch resumes afterwards`(): Unit = runBlocking {
+        val capture = Capture()
+        val adapter = Adapter()
+        val controller = AppController(directory, capture, adapter)
+        try {
+            configureSyntheticClapThreshold(controller)
+            controller.enableWithConsent()
+            awaitCondition { capture.starts.get() == 1 }
+            capture.emit()
+            awaitCondition { controller.state.value.listening }
+            controller.toggleRecognitionTest()
+            assertTrue(controller.state.value.testingRecognition)
+            emitSyntheticDoubleClap(capture)
+            awaitCondition { controller.state.value.activity.any { it.title == "Recognition test · Double clap" } }
+            assertTrue(controller.state.value.lastAcousticEvent.startsWith("clap"))
+            assertTrue(controller.state.value.activity.first { it.title == "Recognition test · Double clap" }.detail.contains("no action executed"))
+            assertTrue(adapter.executions.isEmpty())
+            controller.toggleRecognitionTest()
+            assertFalse(controller.state.value.testingRecognition)
+            emitSyntheticDoubleClap(capture)
+            awaitCondition { adapter.executions.size == 1 }
+            assertEquals(ActionType.OPEN_TERMINAL, adapter.executions.single().type)
+            assertEquals(1, capture.starts.get())
+            assertEquals(0, capture.stops.get())
+        } finally { controller.shutdown() }
+    }
+
+    @Test fun `ten samples of one class remain unsaved and cannot silently enable actions`(): Unit = runBlocking {
+        val capture = Capture()
+        val adapter = Adapter()
+        val controller = AppController(directory, capture, adapter)
+        try {
+            beginLiveCalibration(controller, capture)
+            repeat(10) {
+                readyClap(controller, capture)
+                controller.acceptCandidate(AcousticClass.CLAP)
+            }
+            assertEquals(mapOf(AcousticClass.CLAP to 10), controller.state.value.sampleCounts)
+            assertTrue(controller.state.value.hasUnsavedCalibration)
+            assertFalse(controller.state.value.calibrationSaved)
+            assertFalse(controller.state.value.readyToTrain)
+            assertNull(controller.state.value.activeProfileName)
+            assertTrue(Files.notExists(directory.resolve("calibration.json")))
+            controller.trainProfile()
+            assertFalse(controller.state.value.training)
+            assertTrue(Files.notExists(directory.resolve("calibration.json")))
+            controller.endCalibration()
+            awaitCondition { !controller.state.value.calibrating && controller.state.value.testingRecognition }
+            controller.clearError()
+            controller.enableActions()
+            assertTrue(controller.state.value.testingRecognition)
+            assertNotNull(controller.state.value.error, "Unsaved samples need an explicit next step, not an apparent activation")
+            controller.clearError()
+            controller.toggleRecognitionTest()
+            assertTrue(controller.state.value.testingRecognition)
+            assertNotNull(controller.state.value.error)
+            assertTrue(adapter.executions.isEmpty())
+            controller.resetCalibration()
+            assertFalse(controller.state.value.hasUnsavedCalibration)
+            controller.enableActions()
+            assertFalse(controller.state.value.testingRecognition)
+            assertEquals(1, capture.starts.get())
+            assertEquals(0, capture.stops.get())
         } finally { controller.shutdown() }
     }
 }

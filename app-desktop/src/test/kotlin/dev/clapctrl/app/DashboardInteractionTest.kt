@@ -53,7 +53,7 @@ class DashboardInteractionTest {
             compose.onNodeWithText("Refresh inputs").assertExists().performClick()
             compose.onNodeWithText("Calibration").performClick()
             compose.onNodeWithText("Start session").assertExists()
-            compose.onNodeWithText("Validate & save profile").assertIsNotEnabled()
+            compose.onNodeWithTag("calibration-train").assertIsNotEnabled()
         } finally { runBlocking { controller.shutdown() } }
     }
 }

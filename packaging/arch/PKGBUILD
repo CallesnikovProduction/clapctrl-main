@@ -2,7 +2,7 @@
 #   makepkg --dir packaging/arch
 # No release URL or remote Git source is assumed. prepare() snapshots current source.
 pkgname=clapctrl
-pkgver=0.1.0
+pkgver=0.1.2
 pkgrel=1
 pkgdesc='Local acoustic desktop automation for Linux and Windows'
 arch=('x86_64' 'aarch64')
